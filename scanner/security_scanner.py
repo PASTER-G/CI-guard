@@ -43,28 +43,20 @@ class TerraformSecurityScanner:
             print(f"❌ Таймаут при выполнении команды: {' '.join(command)}")
             sys.exit(1)
 
-    def extract_json_from_output(self, output: str) -> str:
-        """
-        Извлекает чистый JSON из вывода terraform show.
-        Удаляет любые не-JSON данные, которые могут быть добавлены после основного JSON.
-        """
-        # Ищем начало и конец JSON объекта
-        start_idx = output.find('{')
-        end_idx = output.rfind('}') + 1
-        
-        if start_idx == -1 or end_idx == 0:
-            print("❌ Не удалось найти JSON в выводе")
-            print(f"Вывод: {output}")
-            return ""
-        
-        # Извлекаем только JSON часть
-        json_str = output[start_idx:end_idx]
-        
+    def clean_json_output(self, json_string: str) -> str:
+        """Очищает вывод JSON от возможных нежелательных символов."""
         # Удаляем ANSI escape sequences (цвета)
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        cleaned_json = ansi_escape.sub('', json_str)
+        cleaned = ansi_escape.sub('', json_string)
         
-        return cleaned_json
+        # Удаляем возможные предупреждения перед JSON
+        if not cleaned.strip().startswith('{'):
+            # Ищем начало JSON объекта
+            match = re.search(r'(\{.*\})', cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(1)
+        
+        return cleaned.strip()
 
     def run_terraform_plan(self) -> str:
         """
@@ -89,18 +81,18 @@ class TerraformSecurityScanner:
         print("✓ Конвертация Terraform plan в JSON...")
         # Конвертируем бинарный план в JSON
         show_command = ["terraform", "show", "-json", self.plan_file]
-        plan_output = self.run_terraform_command(show_command)
+        plan_json = self.run_terraform_command(show_command)
         
-        # Извлекаем чистый JSON из вывода
-        plan_json = self.extract_json_from_output(plan_output)
+        # Очищаем вывод JSON
+        cleaned_json = self.clean_json_output(plan_json)
         
-        if not plan_json:
-            print("❌ Не удалось извлечь JSON из вывода")
-            print(f"Полный вывод: {plan_output}")
+        if not cleaned_json:
+            print("❌ Пустой вывод от terraform show после очистки")
+            print(f"Исходный вывод: {plan_json}")
             sys.exit(1)
             
-        print(f"✓ Извлечен JSON длиной {len(plan_json)} символов")
-        return plan_json
+        print(f"✓ Получен JSON длиной {len(cleaned_json)} символов")
+        return cleaned_json
 
     def parse_plan(self, plan_json: str) -> None:
         """Парсит JSON вывод плана и сохраняет его в атрибуте."""
@@ -110,10 +102,7 @@ class TerraformSecurityScanner:
         except json.JSONDecodeError as e:
             print(f"❌ Не удалось распарсить JSON: {e}")
             print(f"Проблема в позиции {e.pos}: {plan_json[max(0, e.pos-50):e.pos+50]}")
-            # Сохраняем JSON в файл для отладки
-            with open("debug_plan.json", "w") as f:
-                f.write(plan_json)
-            print("✓ JSON сохранен в файл debug_plan.json для отладки")
+            print(f"Полный JSON: {plan_json}")
             sys.exit(1)
 
     def check_insecure_cidr(self, resource: Dict[str, Any]) -> None:
