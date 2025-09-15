@@ -1,0 +1,38 @@
+# .github/workflows/security-scan.yml
+
+name: Terraform Security Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  security-scan:
+    name: Run Terraform Security Scanner
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Run Security Scanner
+      run: |
+        cd scanner/
+        python security_scanner.py --tf-dir=..
+
+    # Этап применения будет запущен ТОЛЬКО если сканер завершился с кодом 0
+    - name: Terraform Apply
+      if: success()
+      run: terraform apply -auto-approve plan.tfplan
+      working-directory: .  # Применяем в корневой директории
