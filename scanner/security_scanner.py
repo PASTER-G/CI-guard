@@ -20,7 +20,6 @@ class TerraformSecurityScanner:
         self.vulnerabilities_found = 0
         self.plan_data = None
         self.terraform_dir = os.path.abspath(terraform_dir)
-        self.plan_file = os.path.join(self.terraform_dir, "plan.tfplan")
 
     def run_terraform_command(self, command: List[str]) -> str:
         """Выполняет команду Terraform в указанной директории."""
@@ -43,56 +42,86 @@ class TerraformSecurityScanner:
             print(f"❌ Таймаут при выполнении команды: {' '.join(command)}")
             sys.exit(1)
 
-    def clean_json_output(self, json_string: str) -> str:
-        """Очищает вывод JSON от возможных нежелательных символов."""
-        # Удаляем ANSI escape sequences (цвета)
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        cleaned = ansi_escape.sub('', json_string)
-        
-        # Удаляем возможные предупреждения перед JSON
-        if not cleaned.strip().startswith('{'):
-            # Ищем начало JSON объекта
-            match = re.search(r'(\{.*\})', cleaned, re.DOTALL)
-            if match:
-                cleaned = match.group(1)
-        
-        return cleaned.strip()
-
     def run_terraform_plan(self) -> str:
         """
-        Выполняет команду `terraform plan` и возвращает JSON-вывод.
+        Выполняет команду `terraform plan` с флагом -json и возвращает JSON-вывод.
         """
-        print("✓ Создание Terraform plan...")
+        print("✓ Создание Terraform plan в JSON формате...")
         
-        # Убедимся, что старый план удален
-        if os.path.exists(self.plan_file):
-            os.remove(self.plan_file)
+        # Используем флаг -json для получения вывода напрямую в JSON формате
+        plan_command = ["terraform", "plan", "-input=false", "-json"]
+        plan_output = self.run_terraform_command(plan_command)
+        
+        # Извлекаем JSON из потока вывода
+        plan_json = self.extract_json_from_stream(plan_output)
+        
+        if not plan_json:
+            print("❌ Не удалось извлечь JSON из вывода")
+            print(f"Полный вывод: {plan_output}")
+            sys.exit(1)
             
-        # Создаем план
-        plan_command = ["terraform", "plan", "-input=false", f"-out={self.plan_file}"]
-        plan_result = self.run_terraform_command(plan_command)
-        print(f"Plan output: {plan_result}")
+        print(f"✓ Извлечен JSON длиной {len(plan_json)} символов")
+        
+        # Нормализуем JSON (удаляем лишние пробелы и форматирование)
+        normalized_json = self.normalize_json(plan_json)
+        print(f"✓ Нормализованный JSON длиной {len(normalized_json)} символов")
+        
+        return normalized_json
 
-        # Проверяем, что план создан
-        if not os.path.exists(self.plan_file):
-            print("❌ Файл плана не был создан")
-            sys.exit(1)
-            
-        print("✓ Конвертация Terraform plan в JSON...")
-        # Конвертируем бинарный план в JSON
-        show_command = ["terraform", "show", "-json", self.plan_file]
-        plan_json = self.run_terraform_command(show_command)
+    def extract_json_from_stream(self, output: str) -> str:
+        """
+        Извлекает JSON из потока вывода terraform plan -json.
+        Terraform выводит несколько JSON объектов, нам нужен последний (полный план).
+        """
+        # Разделяем вывод по строкам и ищем JSON объекты
+        lines = output.strip().split('\n')
+        json_objects = []
         
-        # Очищаем вывод JSON
-        cleaned_json = self.clean_json_output(plan_json)
+        for line in lines:
+            line = line.strip()
+            if line and (line.startswith('{') and line.endswith('}')):
+                try:
+                    # Пытаемся парсить каждую строку как JSON
+                    json.loads(line)
+                    json_objects.append(line)
+                except json.JSONDecodeError:
+                    # Пропускаем не-JSON строки
+                    continue
         
-        if not cleaned_json:
-            print("❌ Пустой вывод от terraform show после очистки")
-            print(f"Исходный вывод: {plan_json}")
+        if not json_objects:
+            print("❌ Не найдено JSON в выводе")
+            print(f"Вывод: {output}")
+            return ""
+        
+        # Берем последнюю JSON строку, которая должна содержать полный план
+        return json_objects[-1]
+
+    def normalize_json(self, json_str: str) -> str:
+        """
+        Нормализует JSON, удаляя лишние пробелы и форматирование,
+        чтобы обеспечить консистентность между разными средами выполнения.
+        """
+        try:
+            # Парсим и снова сериализуем JSON для нормализации
+            parsed_json = json.loads(json_str)
+            return json.dumps(parsed_json, separators=(',', ':'))
+        except json.JSONDecodeError as e:
+            print(f"❌ Не удалось нормализовать JSON: {e}")
+            return json_str
+
+    def parse_plan(self, plan_json: str) -> None:
+        """Парсит JSON вывод плана и сохраняет его в атрибуте."""
+        try:
+            self.plan_data = json.loads(plan_json)
+            print("✓ JSON успешно распарсен")
+        except json.JSONDecodeError as e:
+            print(f"❌ Не удалось распарсить JSON: {e}")
+            print(f"Проблема в позиции {e.pos}: {plan_json[max(0, e.pos-50):e.pos+50]}")
+            # Сохраняем JSON в файл для отладки
+            with open("debug_plan.json", "w") as f:
+                f.write(plan_json)
+            print("✓ JSON сохранен в файл debug_plan.json для отладки")
             sys.exit(1)
-            
-        print(f"✓ Получен JSON длиной {len(cleaned_json)} символов")
-        return cleaned_json
 
     def parse_plan(self, plan_json: str) -> None:
         """Парсит JSON вывод плана и сохраняет его в атрибуте."""
