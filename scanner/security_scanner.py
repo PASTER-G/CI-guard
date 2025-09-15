@@ -38,6 +38,34 @@ class TerraformSecurityScanner:
             print(f"Stderr: {e.stderr}")
             sys.exit(1)
 
+    def extract_json_from_output(self, output: str) -> str:
+        """
+        Извлекает чистый JSON из вывода terraform show.
+        Использует метод raw_decode для извлечения первого JSON объекта.
+        """
+        # Удаляем ANSI escape sequences
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        cleaned_output = ansi_escape.sub('', output)
+        
+        # Ищем начало JSON объекта
+        start_idx = cleaned_output.find('{')
+        if start_idx == -1:
+            print("Не найдено начало JSON объекта в выводе")
+            return ""
+        
+        # Используем raw_decode для извлечения первого JSON объекта
+        try:
+            decoder = json.JSONDecoder()
+            obj, end_idx = decoder.raw_decode(cleaned_output[start_idx:])
+            return json.dumps(obj, separators=(',', ':'))
+        except json.JSONDecodeError as e:
+            print(f"Ошибка при извлечении JSON: {e}")
+            # Попробуем найти JSON с помощью регулярного выражения
+            json_match = re.search(r'(\{.*\})', cleaned_output, re.DOTALL)
+            if json_match:
+                return json_match.group(1)
+            return ""
+
     def get_terraform_plan_json(self) -> str:
         """
         Получает полный JSON вывод плана Terraform.
@@ -78,30 +106,15 @@ class TerraformSecurityScanner:
         show_command = ["terraform", "show", "-json", self.plan_file]
         plan_output = self.run_terraform_command(show_command)
         
-        # Очищаем вывод от возможных не-JSON данных
-        clean_json = self.clean_terraform_output(plan_output)
+        # Извлекаем чистый JSON из вывода
+        clean_json = self.extract_json_from_output(plan_output)
         
         if not clean_json.strip():
-            print("Получен пустой JSON после очистки")
+            print("Не удалось извлечь JSON из вывода")
             print(f"Исходный вывод: {plan_output}")
             sys.exit(1)
             
         return clean_json
-
-    def clean_terraform_output(self, output: str) -> str:
-        """
-        Очищает вывод Terraform от не-JSON данных.
-        """
-        # Удаляем ANSI escape sequences
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        cleaned = ansi_escape.sub('', output)
-        
-        # Ищем JSON объект
-        json_match = re.search(r'(\{.*\})', cleaned, re.DOTALL)
-        if json_match:
-            return json_match.group(1)
-        
-        return cleaned
 
     def parse_plan(self, plan_json: str) -> None:
         """Парсит JSON вывод плана и сохраняет его в атрибуте."""
