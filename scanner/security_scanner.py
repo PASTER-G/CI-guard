@@ -190,7 +190,7 @@ class TerraformSecurityScanner:
                         print(f"Не удалось распарсить JSON в триггерах ресурса {resource_name}")
 
     def report_vulnerability(self, resource_type: str, resource_name: str, vuln_code: str, message: str) -> None:
-        """Увеличивает счетчик уязвимостей и выводит понятное сообщение."""
+        """Увеличивает счетчик уязвимостей и выводит сообщение."""
         self.vulnerabilities_found += 1
         print(f"\n--- SECURITY ALERT ---")
         print(f"Resource: {resource_type}.{resource_name}")
@@ -254,7 +254,7 @@ def main():
     parser = argparse.ArgumentParser(description='Security Scanner for Terraform Plan')
     parser.add_argument('--tf-dir', 
                         default='..', 
-                        help='Путь к директории с Terraform-конфигурацией (по умолчанию: родительская директория)')
+                        help='Путь к директории с Terraform-конфигурацией (по умолчанию: . директория)')
     args = parser.parse_args()
 
     scanner = TerraformSecurityScanner(args.tf_dir)
