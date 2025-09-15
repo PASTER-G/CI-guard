@@ -9,6 +9,7 @@ import subprocess
 import sys
 import argparse
 import os
+import re
 from typing import Dict, Any, List
 
 class TerraformSecurityScanner:
@@ -30,7 +31,7 @@ class TerraformSecurityScanner:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=300  # Таймаут 5 минут
+                timeout=300
             )
             return result.stdout
         except subprocess.CalledProcessError as e:
@@ -42,10 +43,24 @@ class TerraformSecurityScanner:
             print(f"❌ Таймаут при выполнении команды: {' '.join(command)}")
             sys.exit(1)
 
+    def clean_json_output(self, json_string: str) -> str:
+        """Очищает вывод JSON от возможных нежелательных символов."""
+        # Удаляем ANSI escape sequences (цвета)
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        cleaned = ansi_escape.sub('', json_string)
+        
+        # Удаляем возможные предупреждения перед JSON
+        if not cleaned.strip().startswith('{'):
+            # Ищем начало JSON объекта
+            match = re.search(r'(\{.*\})', cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(1)
+        
+        return cleaned.strip()
+
     def run_terraform_plan(self) -> str:
         """
         Выполняет команду `terraform plan` и возвращает JSON-вывод.
-        Использование JSON гарантирует стабильный и предсказуемый парсинг.
         """
         print("✓ Создание Terraform plan...")
         
@@ -53,8 +68,7 @@ class TerraformSecurityScanner:
         if os.path.exists(self.plan_file):
             os.remove(self.plan_file)
             
-        # -input=false предотвращает интерактивные запросы в CI/CD
-        # -out plan.tfplan сохраняет план для последующего применения
+        # Создаем план
         plan_command = ["terraform", "plan", "-input=false", f"-out={self.plan_file}"]
         plan_result = self.run_terraform_command(plan_command)
         print(f"Plan output: {plan_result}")
@@ -62,24 +76,23 @@ class TerraformSecurityScanner:
         # Проверяем, что план создан
         if not os.path.exists(self.plan_file):
             print("❌ Файл плана не был создан")
-            # Попробуем выполнить plan без сохранения в файл для диагностики
-            plan_command_diag = ["terraform", "plan", "-input=false"]
-            diag_result = self.run_terraform_command(plan_command_diag)
-            print(f"Диагностический вывод plan: {diag_result}")
             sys.exit(1)
             
         print("✓ Конвертация Terraform plan в JSON...")
-        # Конвертируем бинарный план в машиночитаемый JSON
+        # Конвертируем бинарный план в JSON
         show_command = ["terraform", "show", "-json", self.plan_file]
         plan_json = self.run_terraform_command(show_command)
         
-        # Проверяем, что вывод не пустой
-        if not plan_json.strip():
-            print("❌ Пустой вывод от terraform show")
+        # Очищаем вывод JSON
+        cleaned_json = self.clean_json_output(plan_json)
+        
+        if not cleaned_json:
+            print("❌ Пустой вывод от terraform show после очистки")
+            print(f"Исходный вывод: {plan_json}")
             sys.exit(1)
             
-        print(f"Полученный JSON (первые 500 символов): {plan_json[:500]}...")
-        return plan_json
+        print(f"✓ Получен JSON длиной {len(cleaned_json)} символов")
+        return cleaned_json
 
     def parse_plan(self, plan_json: str) -> None:
         """Парсит JSON вывод плана и сохраняет его в атрибуте."""
@@ -88,20 +101,16 @@ class TerraformSecurityScanner:
             print("✓ JSON успешно распарсен")
         except json.JSONDecodeError as e:
             print(f"❌ Не удалось распарсить JSON: {e}")
-            print(f"Содержимое JSON: {plan_json}")
+            print(f"Проблема в позиции {e.pos}: {plan_json[max(0, e.pos-50):e.pos+50]}")
+            print(f"Полный JSON: {plan_json}")
             sys.exit(1)
 
     def check_insecure_cidr(self, resource: Dict[str, Any]) -> None:
-        """
-        Проверяет ресурсы на наличие небезопасных правил CIDR (0.0.0.0/0).
-        Анализирует JSON в триггерах null_resource.
-        """
+        """Проверяет ресурсы на наличие небезопасных правил CIDR."""
         if resource['type'] == "null_resource" and 'insecure_sg' in resource.get('name', ''):
-            # Получаем значения триггеров
             values = resource.get('values', {})
             triggers = values.get('triggers', {})
             
-            # Ищем правило безопасности в триггерах
             rule_json = triggers.get('rule')
             if rule_json:
                 try:
@@ -109,7 +118,6 @@ class TerraformSecurityScanner:
                     cidr = rule.get('cidr', '')
                     port = rule.get('port', '')
                     
-                    # Проверяем на небезопасные конфигурации
                     if cidr == "0.0.0.0/0" and port in [22, 3389]:
                         self.report_vulnerability(
                             resource['type'],
@@ -118,23 +126,20 @@ class TerraformSecurityScanner:
                             f"Обнаружено небезопасное правило: порт {port} открыт для всего интернета (0.0.0.0/0)"
                         )
                 except json.JSONDecodeError:
-                    print(f"Не удалось распарсить JSON в триггерах ресурса {resource['name']}")
+                    print(f"⚠️ Не удалось распарсить JSON в триггерах ресурса {resource['name']}")
 
     def check_unencrypted_disks(self, resource: Dict[str, Any]) -> None:
         """Проверяет ресурсы на наличие незашифрованных дисков."""
         if resource['type'] == "null_resource" and 'unencrypted' in resource.get('name', ''):
-            # Получаем значения триггеров
             values = resource.get('values', {})
             triggers = values.get('triggers', {})
             
-            # Ищем конфигурацию диска в триггерах
             config_json = triggers.get('config')
             if config_json:
                 try:
                     config = json.loads(config_json)
                     encrypted = config.get('encrypted', True)
                     
-                    # Проверяем на незашифрованные диски
                     if not encrypted:
                         self.report_vulnerability(
                             resource['type'],
@@ -143,12 +148,12 @@ class TerraformSecurityScanner:
                             "Обнаружен незашифрованный диск. Требуется включить шифрование."
                         )
                 except json.JSONDecodeError:
-                    print(f"Не удалось распарсить JSON в триггерах ресурса {resource['name']}")
+                    print(f"⚠️ Не удалось распарсить JSON в триггерах ресурса {resource['name']}")
 
     def report_vulnerability(self, resource_type: str, resource_name: str, vuln_code: str, message: str) -> None:
         """Увеличивает счетчик уязвимостей и выводит понятное сообщение."""
         self.vulnerabilities_found += 1
-        print(f"\n--- SECURITY ALERT ---")
+        print(f"\n--- 🔴 SECURITY ALERT ---")
         print(f"Resource: {resource_type}.{resource_name}")
         print(f"Code: {vuln_code}")
         print(f"Message: {message}")
@@ -156,17 +161,17 @@ class TerraformSecurityScanner:
 
     def scan(self) -> None:
         """Основной метод, запускающий весь процесс сканирования."""
-        print(f"Запуск Terraform Security Scanner в директории: {self.terraform_dir}")
+        print(f"🚀 Запуск Terraform Security Scanner в директории: {self.terraform_dir}")
         
         # Проверяем, существует ли директория с Terraform-конфигурацией
         if not os.path.exists(self.terraform_dir):
-            print(f"Директория {self.terraform_dir} не существует!")
+            print(f"❌ Директория {self.terraform_dir} не существует!")
             sys.exit(1)
             
         # Проверяем, есть ли в директории Terraform-файлы
         tf_files = [f for f in os.listdir(self.terraform_dir) if f.endswith('.tf')]
         if not tf_files:
-            print(f"В директории {self.terraform_dir} нет .tf файлов!")
+            print(f"❌ В директории {self.terraform_dir} нет .tf файлов!")
             sys.exit(1)
             
         print("Этап 1: Инициализация Terraform...")
@@ -179,29 +184,24 @@ class TerraformSecurityScanner:
         self.parse_plan(plan_json)
 
         print("Этап 4: Сканирование ресурсов на уязвимости...")
-        # Проходим по всем ресурсам в плане
         resources = self.plan_data.get('planned_values', {}).get('root_module', {}).get('resources', [])
         for resource in resources:
             self.check_insecure_cidr(resource)
             self.check_unencrypted_disks(resource)
-            # Здесь можно добавить другие проверки...
 
         # Финальный отчет
         print("=" * 50)
-        print("SCAN SUMMARY")
+        print("📊 SCAN SUMMARY")
         print(f"Проверено ресурсов: {len(resources)}")
         print(f"Найдено уязвимостей: {self.vulnerabilities_found}")
         print("=" * 50)
 
         if self.vulnerabilities_found > 0:
-            print("Сканирование завершено с ошибками. Пайплайн должен быть остановлен.")
-            sys.exit(1) # Это "уронит" пайплайн
+            print("❌ Сканирование завершено с ошибками. Пайплайн должен быть остановлен.")
+            sys.exit(1)
         else:
-            print("Сканирование завершено успешно. Критических уязвимостей не найдено.")
+            print("✅ Сканирование завершено успешно. Критических уязвимостей не найдено.")
             sys.exit(0)
-
-    # Остальные методы без изменений...
-    # [check_insecure_cidr, check_unencrypted_disks, report_vulnerability, scan]
 
 def main():
     """Точка входа в скрипт."""
