@@ -35,8 +35,8 @@
 
 1. Клонируйте репозиторий:
 ```bash
-git clone https://github.com/PASTER-G/terraform-security-scanner.git
-cd terraform-security-scanner
+git clone https://github.com/PASTER-G/CI-guard.git
+cd CI-guard
 ```
 2. Инициализируйте Terraform:
 ```bash
