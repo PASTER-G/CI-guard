@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Security Scanner for Terraform Plan
-Integrates into CI/CD to enforce security checks.
+Integrates into CI/CD to enforce security checks (Shift-Left).
 """
 
 import json
@@ -29,12 +29,17 @@ class TerraformSecurityScanner:
                 cwd=self.terraform_dir,
                 check=True,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=300  # Таймаут 5 минут
             )
             return result.stdout
         except subprocess.CalledProcessError as e:
-            print(f"Ошибка при выполнении команды Terraform: {e}")
+            print(f"❌ Ошибка при выполнении команды Terraform: {e}")
             print(f"Stderr: {e.stderr}")
+            print(f"Stdout: {e.stdout}")
+            sys.exit(1)
+        except subprocess.TimeoutExpired:
+            print(f"❌ Таймаут при выполнении команды: {' '.join(command)}")
             sys.exit(1)
 
     def run_terraform_plan(self) -> str:
@@ -42,25 +47,48 @@ class TerraformSecurityScanner:
         Выполняет команду `terraform plan` и возвращает JSON-вывод.
         Использование JSON гарантирует стабильный и предсказуемый парсинг.
         """
-        print("Создание Terraform plan...")
+        print("✓ Создание Terraform plan...")
+        
+        # Убедимся, что старый план удален
+        if os.path.exists(self.plan_file):
+            os.remove(self.plan_file)
+            
         # -input=false предотвращает интерактивные запросы в CI/CD
         # -out plan.tfplan сохраняет план для последующего применения
         plan_command = ["terraform", "plan", "-input=false", f"-out={self.plan_file}"]
-        self.run_terraform_command(plan_command)
+        plan_result = self.run_terraform_command(plan_command)
+        print(f"Plan output: {plan_result}")
 
-        print("Конвертация Terraform plan в JSON...")
-        # Конвертируем бинарный план в JSON
+        # Проверяем, что план создан
+        if not os.path.exists(self.plan_file):
+            print("❌ Файл плана не был создан")
+            # Попробуем выполнить plan без сохранения в файл для диагностики
+            plan_command_diag = ["terraform", "plan", "-input=false"]
+            diag_result = self.run_terraform_command(plan_command_diag)
+            print(f"Диагностический вывод plan: {diag_result}")
+            sys.exit(1)
+            
+        print("✓ Конвертация Terraform plan в JSON...")
+        # Конвертируем бинарный план в машиночитаемый JSON
         show_command = ["terraform", "show", "-json", self.plan_file]
         plan_json = self.run_terraform_command(show_command)
         
+        # Проверяем, что вывод не пустой
+        if not plan_json.strip():
+            print("❌ Пустой вывод от terraform show")
+            sys.exit(1)
+            
+        print(f"Полученный JSON (первые 500 символов): {plan_json[:500]}...")
         return plan_json
 
     def parse_plan(self, plan_json: str) -> None:
         """Парсит JSON вывод плана и сохраняет его в атрибуте."""
         try:
             self.plan_data = json.loads(plan_json)
+            print("✓ JSON успешно распарсен")
         except json.JSONDecodeError as e:
-            print(f"Не удалось распарсить JSON: {e}")
+            print(f"❌ Не удалось распарсить JSON: {e}")
+            print(f"Содержимое JSON: {plan_json}")
             sys.exit(1)
 
     def check_insecure_cidr(self, resource: Dict[str, Any]) -> None:
@@ -172,12 +200,15 @@ class TerraformSecurityScanner:
             print("Сканирование завершено успешно. Критических уязвимостей не найдено.")
             sys.exit(0)
 
+    # Остальные методы без изменений...
+    # [check_insecure_cidr, check_unencrypted_disks, report_vulnerability, scan]
+
 def main():
     """Точка входа в скрипт."""
     parser = argparse.ArgumentParser(description='Security Scanner for Terraform Plan')
     parser.add_argument('--tf-dir', 
                         default='..', 
-                        help='Путь к директории с Terraform-конфигурацией (по умолчанию: . директория)')
+                        help='Путь к директории с Terraform-конфигурацией (по умолчанию: родительская директория)')
     args = parser.parse_args()
 
     scanner = TerraformSecurityScanner(args.tf_dir)
