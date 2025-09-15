@@ -5,6 +5,7 @@
 .terraform.lock.hcl
 terraform.tfvars
 *.auto.tfvars
+raw_plan.json
 
 __pycache__/
 *.pyc
